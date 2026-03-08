@@ -1,4 +1,9 @@
-
+<!-- 
+ *© 2025 web-k11. All rights reserved.
+ * 本程式碼受著作權法保護，未經授權禁止商業使用、修改或完整轉載。
+ * Unauthorized copying, modification, or distribution of this code 
+ * via any medium is strictly prohibited. 
+-->
 
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -540,18 +545,23 @@ function init() {
         updateTitleUI(JSON.parse(cachedTitle));
     }
 
+    let hasCache = false; // 新增這行：用來記錄到底有沒有讀到快取
+
     if (cachedSongs) {
         // 如果有快取，立即渲染，不顯示全屏 Loading
         const data = JSON.parse(cachedSongs);
         processSheetData(data);
         hideLoading(); 
+        hasCache = true; // 新增這行：標記「有快取」
     } else {
         // 沒有快取才顯示全屏 Loading
         showLoading();
     }
 
-    // 無論有無快取，都在背景抓取最新資料
-    fetchSheetData();
+    // 關鍵修改：把 hasCache 傳進去！
+    // 如果 hasCache 是 true (有快取)，就會靜默更新，不會轉圈圈
+    // 如果 hasCache 是 false (沒快取)，就會顯示轉圈圈
+    fetchSheetData(hasCache);
 }
 
 // 創建漂浮元素
@@ -666,72 +676,85 @@ function updateTitleUI(titleDataArray) {
     }
 }
 
-// 獲取試算表數據
-async function fetchSheetData() {
-  hideError();
-  isFetching = true;
-  updateSyncStateUI();
-  
-  try {
-    const titleApiUrl = `https://opensheet.elk.sh/${SHEET_ID}/title`; 
-    const titleResponse = await fetch(titleApiUrl);
-    
-    if (titleResponse.ok) {
-        const titleData = await titleResponse.json();
-        localStorage.setItem(CACHE_KEY_TITLE, JSON.stringify(titleData));
-        updateTitleUI(titleData);
-    }
+// --- 智慧更新設定 ---
+let lastUpdateTimestamp = 0; // 記錄上次成功的更新時間
+const UPDATE_COOLDOWN = 2 * 60 * 1000; // 2 分鐘 (毫秒)
 
-    const songsApiUrl = `https://opensheet.elk.sh/${SHEET_ID}/Sheet1`;
-    const songsResponse = await fetch(songsApiUrl);
-    
-    if (!songsResponse.ok) {
-      return await fetchSheetDataAlternative(SHEET_ID);
-    }
-
-    const songsData = await songsResponse.json();
-    
-    if (!songsData || songsData.length === 0) {
-      throw new Error('No song data found in Sheet1 via OpenSheet');
-    }
-    
-    localStorage.setItem(CACHE_KEY_SONGS, JSON.stringify(songsData));
-    
-    processSheetData(songsData);
-    hideLoading();
-    
-  } catch (err) {
-    console.error('Error fetching sheet data:', err);
-    await fetchSheetDataAlternative(sheetId);
-  } finally {
-      isFetching = false;
-      updateSyncStateUI();
-      if(filteredSongs.length === 0) filterSongs(); 
+// 獲取試算表數據 (新增 isSilent 參數，判斷是否為背景靜默更新)
+async function fetchSheetData(isSilent = false) {
+  // 如果不是靜默更新，才顯示讀取中動畫
+  if (!isSilent) {
+    showLoading();
+    hideError();
   }
-}
 
-// 備用數據源 (SheetDB)
-async function fetchSheetDataAlternative(sheetId) {
   try {
-    const apiUrl = `https://sheetdb.io/api/v1/58f61be4dda40/${sheetId}`;
-    const response = await fetch(apiUrl);
+  // 試算表ID
+    const dataSourceConfig = {
+      sheetId: '1sLi8ap9scV_iKPb_IiGLmP7kpKBk6lbyincsliUNYws',
+      apiKey: 'AIzaSyDFU1PsOmEKCZfnJkCi5-1kVMi6yk5aDtE',
+      targetRange: 'Sheet1',
+      enableDataProxy: true
+    };
     
-    if (!response.ok) {
-      throw new Error('All methods failed');
-    }
-    
+    const proxyEndpoint = 'https://script.google.com/macros/s/AKfycbwTdoZkrg0o90qfqAi5TyxPtFXxCX6lVT9ToeRD7cwjthwINo8Q_ByRWwd8p684XHhI/exec';
+    const targetUrl = `${proxyEndpoint}?t=${new Date().getTime()}`;
+
+    const response = await fetch(targetUrl);
+    if (!response.ok) throw new Error('Network response was not ok');
+
     const data = await response.json();
-    localStorage.setItem(CACHE_KEY_SONGS, JSON.stringify(data));
-    processSheetData(data);
+    
+    // 更新成功，紀錄時間
+    lastUpdateTimestamp = Date.now();
+    console.log(`[DataService] ${isSilent ? '背景更新' : '初次載入'}成功: ${new Date().toLocaleTimeString()}`);
+
+    // 1. 處理標題與頁面設定
+    if (data.titleData && data.titleData.length > 0) {
+      const titleObject = data.titleData[0];
+      if (titleObject['分頁']) document.title = titleObject['分頁'];
+      const mainTitleElement = document.querySelector('.title-effect');
+      if (mainTitleElement) mainTitleElement.textContent = titleObject['大標題'] || '';
+      const subtitleElement = document.querySelector('.subtitle');
+      if (subtitleElement) subtitleElement.textContent = titleObject['副標題'] || '';
+      
+
+      localStorage.setItem(CACHE_KEY_TITLE, JSON.stringify(data.titleData));
+    }
+
+    // 2. 處理內容資料 (自動覆蓋舊資料)
+    if (data.sheet1Data) {
+      processSheetData(data.sheet1Data);
+
+
+      localStorage.setItem(CACHE_KEY_SONGS, JSON.stringify(data.sheet1Data));
+    }
+
     hideLoading();
-  } catch (finalErr) {
-    console.error('All alternative methods failed:', finalErr);
-    hideLoading();
-    if (allSongs.length === 0) {
-        showError();
+  } catch (err) {
+    console.error('[DataService] Sync failed:', err);
+    // 只有在非靜默狀態下才顯示錯誤訊息
+    if (!isSilent) {
+      hideLoading();
+      showError();
     }
   }
 }
+
+// 偵測是否需要更新的邏輯
+function checkForUpdate() {
+  const now = Date.now();
+  // 如果從未更新過，或距離上次更新超過 2 分鐘
+  if (lastUpdateTimestamp !== 0 && (now - lastUpdateTimestamp > UPDATE_COOLDOWN)) {
+    console.log("[AutoSync] 偵測到活動且冷卻結束，啟動背景更新...");
+    fetchSheetData(true); // 傳入 true，代表靜默更新，不轉圈圈
+  }
+}
+
+// 監聽行為：使用者滑動網頁時
+window.addEventListener('scroll', () => {
+  checkForUpdate();
+}, { passive: true });
 
 // 處理數據
 function processSheetData(data) {
@@ -1338,4 +1361,5 @@ function getLanguageClass(language) {
 </script>
 </body>
 </html>
+
 
