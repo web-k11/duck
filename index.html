@@ -502,13 +502,20 @@ let selectedCategories = new Set();
 let currentLanguageFilter = 'all';
 let categoryGroups = new Map();
 let groupOrder = {};
+let displayLimit = 50;  
+const INCREMENT = 50;  
 
 // 快取與渲染控制變量
 let isFetching = false;
 let renderTaskId = null;
-const SHEET_ID = '165uR90MB2xndjghZ_h_BBTZjDAx5MiO_22U3R5pjE4I';
-const CACHE_KEY_SONGS = `app_songs_data_${SHEET_ID}`;
-const CACHE_KEY_TITLE = `app_title_data_${SHEET_ID}`;
+const SHEET_ID = '165uR90MB2rerexndjghZ_h_BBTZjDAx5MiO_22U3R5pjE4I';
+const proxyEndpoint = 'https://script.google.com/macros/s/AKfycbwTdoZkrg0o90qfqAi5TyxPtFXxCX6lVT9ToeRD7cwjthwINo8Q_ByRWwd8p684XHhI/exec';
+
+const gasIdMatch = proxyEndpoint.match(/\/s\/([^\/]+)/);
+const uniqueGasId = gasIdMatch ? gasIdMatch[1] : 'default_id';
+
+const CACHE_KEY_SONGS = `app_songs_data_${uniqueGasId}`;
+const CACHE_KEY_TITLE = `app_title_data_${uniqueGasId}`;
 
 // DOM 元素
 const searchInput = document.getElementById('search-input');
@@ -682,7 +689,9 @@ const UPDATE_COOLDOWN = 2 * 60 * 1000; // 2 分鐘 (毫秒)
 
 // 獲取試算表數據 (新增 isSilent 參數，判斷是否為背景靜默更新)
 async function fetchSheetData(isSilent = false) {
-  // 如果不是靜默更新，才顯示讀取中動畫
+  if (isFetching) return; // 👉 1. 加鎖：已經在抓就退出
+  isFetching = true;   
+  
   if (!isSilent) {
     showLoading();
     hideError();
@@ -697,7 +706,7 @@ async function fetchSheetData(isSilent = false) {
       enableDataProxy: true
     };
     
-    const proxyEndpoint = 'https://script.google.com/macros/s/AKfycbwTdoZkrg0o90qfqAi5TyxPtFXxCX6lVT9ToeRD7cwjthwINo8Q_ByRWwd8p684XHhI/exec';
+    // const proxyEndpoint = 'https://script.google.com/macros/s/AKfycbwTdoZkrg0o90qfqAi5TyxPtFXxCX6lVT9ToeRD7cwjthwINo8Q_ByRWwd8p684XHhI/exec';
     const targetUrl = `${proxyEndpoint}?t=${new Date().getTime()}`;
 
     const response = await fetch(targetUrl);
@@ -738,6 +747,8 @@ async function fetchSheetData(isSilent = false) {
       hideLoading();
       showError();
     }
+ } finally {
+    isFetching = false; // 👉 1. 解鎖：不管成功失敗都要解開
   }
 }
 
@@ -751,10 +762,6 @@ function checkForUpdate() {
   }
 }
 
-// 監聽行為：使用者滑動網頁時
-window.addEventListener('scroll', () => {
-  checkForUpdate();
-}, { passive: true });
 
 // 處理數據
 function processSheetData(data) {
@@ -842,6 +849,7 @@ function processSheetData(data) {
 // 過濾歌曲
 function filterSongs() {
   const searchTerm = searchInput.value.toLowerCase();
+  displayLimit = INCREMENT;
   
   filteredSongs = allSongs.filter(song => {
     if (!song.title) return false;
@@ -1093,31 +1101,52 @@ function updateSyncStateUI() {
 function updateSongsUI() {
   songCount.textContent = filteredSongs.length;
   
-  if (renderTaskId) {
-      cancelAnimationFrame(renderTaskId);
-      renderTaskId = null;
-  }
-
   songsGrid.innerHTML = '';
 
   if (filteredSongs.length === 0) {
-    updateSyncStateUI();
-    return;
-  }
+    emptyState.classList.remove('hidden');
+    songsGrid.classList.add('hidden');
+  } else {
+    emptyState.classList.add('hidden');
+    songsGrid.classList.remove('hidden');
 
-  statusContainer.classList.add('hidden');
-  songsGrid.classList.remove('hidden');
-
-  const BATCH_SIZE = 20;
-  const initialBatch = filteredSongs.slice(0, BATCH_SIZE);
-  renderBatch(initialBatch);
-
-  if (filteredSongs.length > BATCH_SIZE) {
-      renderTaskId = requestAnimationFrame(() => {
-          renderNextChunk(BATCH_SIZE);
-      });
+    // 👉 3. 關鍵：只取出目前額度的歌曲 (前 50 首)
+    const songsToRender = filteredSongs.slice(0, displayLimit);
+    
+    songsToRender.forEach(song => {
+      if (song.title) {
+        const card = createSongCard(song);
+        songsGrid.appendChild(card);
+      }
+    });
   }
 }
+
+// 👉 3. 新增：懶加載函式
+function loadMoreSongs() {
+  const currentLength = songsGrid.children.length;
+  if (currentLength < filteredSongs.length) {
+    const nextBatch = filteredSongs.slice(currentLength, currentLength + INCREMENT);
+    const fragment = document.createDocumentFragment();
+    
+    nextBatch.forEach(song => {
+      if (song.title) {
+        fragment.appendChild(createSongCard(song));
+      }
+    });
+    
+    songsGrid.appendChild(fragment);
+    displayLimit += INCREMENT;
+  }
+}
+
+  // 👉 3. 偵測滑到底部 500px 內，觸發載入更多
+window.addEventListener('scroll', () => {
+  if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+    loadMoreSongs();
+  }
+}, { passive: true });
+          
 
 function renderBatch(batch) {
     const fragment = document.createDocumentFragment();
@@ -1361,6 +1390,7 @@ function getLanguageClass(language) {
 </script>
 </body>
 </html>
+
 
 
 
